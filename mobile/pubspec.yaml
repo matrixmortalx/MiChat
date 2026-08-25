@@ -31,7 +31,9 @@ dependencies:
   # Authentication
   firebase_auth: ^4.6.0
   google_sign_in: ^6.1.0
-  sign_in_with_apple: ^5.0.0
+  # 5.0.0 Android v1 embedding kullanir; Flutter 3.x ile derlenmez.
+  # 6.x v2 embedding'e gecti; Dart tarafinda bu paket henuz kullanilmiyor.
+  sign_in_with_apple: ^6.1.0
 
   # Push Notifications
   firebase_messaging: ^14.6.0
