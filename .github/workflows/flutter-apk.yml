@@ -1,0 +1,566 @@
+name: Flutter APK
+
+# Herhangi bir Flutter projesinden kurulabilir APK ureten genel amacli sablon.
+# .github/workflows/flutter-apk.yml olarak depoya kopyalanir, baska ayar gerekmez.
+# Calistirmak icin: GitHub > Actions > Flutter APK > Run workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Derleme turu'
+        type: choice
+        options: [debug, release]
+        default: debug
+      flavor:
+        description: 'Product flavor (build.gradle icinde productFlavors varsa; ornek: dev)'
+        type: string
+        default: ''
+      project_dir:
+        description: 'pubspec.yaml dizini (bos birakilirsa otomatik bulunur)'
+        type: string
+        default: ''
+      flutter_version:
+        description: 'Flutter surumu (bos = en son stable)'
+        type: string
+        default: ''
+      split_per_abi:
+        description: 'Mimari basina ayri APK (daha kucuk dosya)'
+        type: boolean
+        default: false
+      upgrade_deps:
+        description: 'Bagimliliklari en son ana surumlere yukselt (eski/uyumsuz surum hatalarinda)'
+        type: boolean
+        default: false
+
+# NOT: Kullanici girdileri hicbir yerde ${{ }} ile dogrudan kabuk betigine
+# gomulmez; env uzerinden gecirilip tirnak icinde kullanilir. Aksi halde
+# girdiye kabuk komutu yazilarak runner ele gecirilebilir.
+
+jobs:
+  build:
+    name: APK derle
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1) Flutter projesinin nerede oldugunu bul.
+      #    Depo kokunde olabilir, mobile/ app/ client/ gibi bir alt dizinde de.
+      # ------------------------------------------------------------------
+      - name: Proje dizinini bul
+        id: detect
+        env:
+          IN_PROJECT_DIR: ${{ inputs.project_dir }}
+        run: |
+          if [ -n "$IN_PROJECT_DIR" ]; then
+            dir="$IN_PROJECT_DIR"
+          else
+            dir=$(grep -rl --include=pubspec.yaml 'sdk: flutter' . 2>/dev/null \
+                  | sed 's#/pubspec\.yaml$##; s#^\./##; s#^pubspec\.yaml$#.#' \
+                  | awk '{n=gsub("/","/"); print n, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          fi
+          [ -z "$dir" ] && dir="."
+          # GITHUB_OUTPUT'a satir sonu enjeksiyonunu engelle
+          dir=$(printf '%s' "$dir" | tr -d '\n\r')
+          case "$dir" in
+            *['`$;&|<>()']*) echo "::error::project_dir gecersiz karakter iceriyor."; exit 1 ;;
+          esac
+          if [ ! -f "$dir/pubspec.yaml" ]; then
+            echo "::error::pubspec.yaml bulunamadi ($dir). project_dir girdisiyle elle belirtin."
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "Flutter projesi: $dir"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ inputs.flutter_version }}
+          cache: true
+
+      # ------------------------------------------------------------------
+      # 2) Eksik Android iskelesini tamamla.
+      #    AI ile uretilen depolarda cok siklikla gradlew, settings.gradle,
+      #    MainActivity ve res/ eksiktir; bunlarsiz derleme hic baslamaz.
+      #
+      #    Iki calisma bicimi var:
+      #    - Bosluk doldurma (varsayilan): sadece eksik dosyalar kopyalanir,
+      #      var olan build.gradle gibi dosyalara dokunulmaz.
+      #    - Gradle katmanini yenileme: android/ icinde settings.gradle de
+      #      gradlew de yoksa o Gradle yapilandirmasi zaten hic calismamis
+      #      demektir; bu durumda Gradle dosyalari iskeleden alinir.
+      #      Manifest, res/ ve kaynak kodlar her hâlükârda korunur.
+      # ------------------------------------------------------------------
+      - name: Eksik Android dosyalarini tamamla
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          name=$(awk '/^name:/{print $2; exit}' pubspec.yaml | tr -d "\"'" | tr '-' '_')
+          [ -z "$name" ] && name=app
+
+          # Paket adini mevcut applicationId/namespace'ten turet ki MainActivity
+          # dogru pakete yazilsin. Flutter paketi org + "." + proje adi olarak
+          # kurar; bu yuzden son parcayi proje adi, oncesini org yapiyoruz.
+          appid=$(grep -rhoE '(applicationId|namespace)[[:space:]=]+"[^"]+"' android/app/build.gradle* 2>/dev/null \
+                  | head -1 | grep -oE '"[^"]+"' | tr -d '"')
+          if [ -n "$appid" ]; then
+            org="${appid%.*}"
+            leaf="${appid##*.}"
+          else
+            org="com.example"; leaf="$name"
+          fi
+          # Dart paket adi kucuk harf/rakam/alt cizgi olmali ve rakamla baslamamali
+          case "$leaf" in
+            [a-z]*) : ;;
+            *) leaf="app" ;;
+          esac
+          echo "Paket: ${appid:-yok} | org: $org | iskele adi: $leaf"
+
+          legacy=0
+          if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ] \
+             && [ ! -f android/gradlew ]; then
+            legacy=1
+            echo "::warning::android/ icinde settings.gradle ve gradlew yok - bu Gradle yapilandirmasi calisir durumda degil. Gradle katmani yeniden uretiliyor; productFlavors ve Firebase gradle eklentisi gibi elle yazilmis ayarlar gecerliligini yitirir."
+          fi
+
+          tmp=$(mktemp -d)
+          flutter create --platforms=android --project-name "$leaf" --org "$org" "$tmp/scaffold" >/dev/null
+
+          # Gradle "katmani": derlemeyi ayakta tutan yapilandirma dosyalari.
+          # Legacy modda bunlarin tamami iskeleden gelir - yarisi eski yarisi
+          # yeni bir katman Gradle'i "unsupported Gradle project" ile durdurur.
+          is_gradle_layer() {
+            case "$1" in
+              android/build.gradle|android/build.gradle.kts) return 0 ;;
+              android/settings.gradle|android/settings.gradle.kts) return 0 ;;
+              android/app/build.gradle|android/app/build.gradle.kts) return 0 ;;
+              android/gradle.properties|android/gradlew|android/gradlew.bat) return 0 ;;
+              android/gradle/wrapper/*) return 0 ;;
+            esac
+            return 1
+          }
+
+          added=0; replaced=0
+          while IFS= read -r f; do
+            rel="${f#$tmp/scaffold/}"
+
+            if [ ! -e "$rel" ]; then
+              # Bosluk doldurma modunda ayni dizinde iki DSL olusmasin
+              if [ "$legacy" = "0" ]; then
+                case "$rel" in
+                  *.kts) [ -e "${rel%.kts}" ] && continue ;;
+                  *.gradle) [ -e "${rel}.kts" ] && continue ;;
+                esac
+              fi
+              mkdir -p "$(dirname "$rel")"
+              cp "$f" "$rel"
+              echo "  + $rel"
+              added=$((added+1))
+            elif [ "$legacy" = "1" ] && is_gradle_layer "$rel"; then
+              cp "$rel" "$rel.bak-original"
+              cp "$f" "$rel"
+              echo "  ~ $rel (eskisi $rel.bak-original olarak saklandi)"
+              replaced=$((replaced+1))
+            fi
+          done < <(find "$tmp/scaffold/android" -type f)
+
+          # Legacy modda iskele .kts uretmisse eski Groovy esdegerini devre disi
+          # birak; ikisi ayni anda durursa Gradle hangisini okuyacagini bilemez.
+          if [ "$legacy" = "1" ]; then
+            for g in android/build.gradle android/app/build.gradle android/settings.gradle; do
+              if [ -f "$g" ] && [ -f "$g.kts" ]; then
+                mv "$g" "$g.bak-original"
+                echo "  - $g devre disi (${g}.bak-original)"
+              fi
+            done
+          fi
+
+          # MainActivity dogru pakette mi? Iskele bizim adlandirmamizla urettigi
+          # icin normalde dogrudur; yine de manifest'in bekledigi pakete tasi.
+          if [ -n "$appid" ]; then
+            want="android/app/src/main/kotlin/$(printf '%s' "$appid" | tr '.' '/')"
+            have=$(find android/app/src/main/kotlin android/app/src/main/java \
+                   -name 'MainActivity.kt' 2>/dev/null | head -1)
+            if [ -n "$have" ] && [ ! -f "$want/MainActivity.kt" ]; then
+              mkdir -p "$want"
+              sed "s/^package .*/package $appid/" "$have" > "$want/MainActivity.kt"
+              rm -f "$have"
+              echo "  > MainActivity $appid paketine tasindi"
+            fi
+          fi
+
+          [ -f android/gradlew ] && chmod +x android/gradlew
+          rm -rf "$tmp"
+          echo "Eklenen: $added, degistirilen: $replaced"
+
+      # ------------------------------------------------------------------
+      # 3) Android v2 embedding isareti.
+      #    Elle yazilmis AndroidManifest.xml dosyalarinda bu meta-data cogu
+      #    zaman unutulur ve derleme "use of deleted Android v1 embedding"
+      #    hatasiyla durur.
+      # ------------------------------------------------------------------
+      - name: Android v2 embedding isaretini ekle
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          m=android/app/src/main/AndroidManifest.xml
+          if [ -f "$m" ] && ! grep -q 'flutterEmbedding' "$m"; then
+            sed -i 's#</application>#    <meta-data android:name="flutterEmbedding" android:value="2" />\n    </application>#' "$m"
+            echo "flutterEmbedding=2 eklendi."
+          else
+            echo "Gerekmedi."
+          fi
+
+      # ------------------------------------------------------------------
+      # 3b) Core library desugaring.
+      #     flutter_local_notifications 17.x ve bazi yeni eklentiler
+      #     java.time API'sini kullanir; bu API Android < 26'da yoktur.
+      #     Derleme "Dependency requires core library desugaring to be
+      #     enabled" ile durur. Etkinleştirmek icin compileOptions'a
+      #     coreLibraryDesugaringEnabled=true ve dependencies'e
+      #     com.android.tools:desugar_jdk_libs eklenir.
+      # ------------------------------------------------------------------
+      - name: Android core library desugaring etkinleştir
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          bg=android/app/build.gradle
+          [ -f android/app/build.gradle.kts ] && bg=android/app/build.gradle.kts
+          if [ ! -f "$bg" ]; then
+            echo "build.gradle bulunamadi, desugaring atlanıyor."
+            exit 0
+          fi
+          case "$bg" in
+            *.kts)
+              if ! grep -q 'isCoreLibraryDesugaringEnabled' "$bg"; then
+                sed -i 's#compileOptions {#compileOptions {\n        isCoreLibraryDesugaringEnabled = true#' "$bg"
+                echo "isCoreLibraryDesugaringEnabled=true eklendi (kts)."
+              fi
+              if ! grep -q 'desugar_jdk_libs' "$bg"; then
+                printf '\n\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> "$bg"
+                echo "desugar_jdk_libs bagimliligi eklendi (kts)."
+              fi
+              # checker-qual: firebase_auth 6.6.0+ Kotlin kodunda
+              # @UnknownInitialization kullaniyor; paket bunu transitif
+              # olarak getirmiyor. compileOnly ekleyerek Kotlin'in cozumu
+              # icin sinifi gorunur kil, ama APK'ya dahil etme.
+              if ! grep -q 'checker-qual' "$bg"; then
+                printf '\n\ndependencies {\n    compileOnly("org.checkerframework:checker-qual:3.49.5")\n}\n' >> "$bg"
+                echo "checker-qual (compileOnly) eklendi (kts)."
+              fi
+              ;;
+            *)
+              if ! grep -q 'coreLibraryDesugaringEnabled' "$bg"; then
+                sed -i 's#compileOptions {#compileOptions {\n        coreLibraryDesugaringEnabled true#' "$bg"
+                echo "coreLibraryDesugaringEnabled=true eklendi."
+              fi
+              if ! grep -q 'desugar_jdk_libs' "$bg"; then
+                printf "\n\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n" >> "$bg"
+                echo "desugar_jdk_libs bagimliligi eklendi."
+              fi
+              if ! grep -q 'checker-qual' "$bg"; then
+                printf "\n\ndependencies {\n    compileOnly 'org.checkerframework:checker-qual:3.49.5'\n}\n" >> "$bg"
+                echo "checker-qual (compileOnly) eklendi."
+              fi
+              ;;
+          esac
+
+      # ------------------------------------------------------------------
+      # 3c) compileSdk / targetSdk'yi 34+'a yukselt.
+      #     Modern eklentilerin AndroidX bagimliliklari (fragment 1.7+,
+      #     activity 1.9+ vb.) compileSdk >= 34 istiyor. Flutter iskele
+      #     sablonu bazi durumlarda 33 ile gelir; AAR metadata kontrolu
+      #     "Dependency requires libraries to compile against version 34
+      #     or later" ile derlemeyi durdurur. 34 ile AGP 7.4+ uyumlu,
+      #     daha yeni Gradle'lar 36 kaldirir; bu nedenle Flutter SDK'sinin
+      #     izin verdigi en dusuk modern deger olan 34 sectik.
+      # ------------------------------------------------------------------
+      - name: compileSdk / targetSdk'yi 34'e yukselt
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          bg=android/app/build.gradle
+          [ -f android/app/build.gradle.kts ] && bg=android/app/build.gradle.kts
+          if [ ! -f "$bg" ]; then
+            echo "build.gradle bulunamadi, atlanıyor."
+            exit 0
+          fi
+          # Groovy: compileSdkVersion N / targetSdkVersion N
+          sed -i -E 's#(compileSdkVersion)[[:space:]]+[0-9]+#\1 34#g' "$bg"
+          sed -i -E 's#(targetSdkVersion)[[:space:]]+[0-9]+#\1 34#g' "$bg"
+          # Kotlin DSL: compileSdk = N / targetSdk = N
+          sed -i -E 's#(compileSdk)[[:space:]]*=[[:space:]]*[0-9]+#\1 = 34#g' "$bg"
+          sed -i -E 's#(targetSdk)[[:space:]]*=[[:space:]]*[0-9]+#\1 = 34#g' "$bg"
+          echo "compileSdk/targetSdk 34'e yukseltildi:"
+          grep -E '(compileSdk|targetSdk)' "$bg" | head -5
+
+          # ------------------------------------------------------------------
+          # Tum alt projeleri (eklentiler) compileSdk 34'e zorla.
+          # Uygulamanin compileSdk'sini yukseltmek yetmez; eklentilerin kendi
+          # AAR metadata'sinda compileSdk = 33 yaziyorsa kontrol yine
+          # basarisiz olur. subprojects { plugins.withType { ... } } ile
+          # her android library eklentisinin compileSdk degeri 34'e cekilir;
+          # boylece eklentiler yeniden derlenirken AAR metadata SDK 34'e
+          # guncellenir. plugins.withType, afterEvaluate'e gore daha erken
+          # calistigi icin "already evaluated" hatasina dusmez.
+          # ------------------------------------------------------------------
+          root_bg=android/build.gradle
+          [ -f android/build.gradle.kts ] && root_bg=android/build.gradle.kts
+          if [ -f "$root_bg" ]; then
+            if ! grep -q 'matrixportalx-ci-subprojects-override' "$root_bg"; then
+              case "$root_bg" in
+                *.kts)
+                  printf '\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    plugins.withType<com.android.build.gradle.LibraryPlugin> {\n        extensions.configure<com.android.build.gradle.LibraryExtension>("android") {\n            if (compileSdk == null || compileSdk!! < 34) {\n                compileSdk = 34\n            }\n        }\n    }\n}\n' >> "$root_bg"
+                  echo "subprojects override eklendi (kts)."
+                  ;;
+                *)
+                  printf "\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    plugins.withType(com.android.build.gradle.LibraryPlugin) {\n        project.android {\n            if (compileSdkVersion == null || compileSdkVersion < 34) {\n                compileSdkVersion 34\n            }\n        }\n    }\n}\n" >> "$root_bg"
+                  echo "subprojects override eklendi (groovy)."
+                  ;;
+              esac
+            fi
+            # ------------------------------------------------------------------
+            # firebase_auth 6.6.0 checker-qual workaround (FlutterFire #18608).
+            # Uygulamanin compileOnly'si plugin classpath'ine ulasmiyor;
+            # tum alt projelerin tum konfigurasyonlarina resolutionStrategy
+            # ile checker-qual enjekte edilir. Boylece Kotlin derleyicisi
+            # firebase_auth kaynak kodundaki @UnknownInitialization
+            # referansini cozebilir.
+            # ------------------------------------------------------------------
+            if ! grep -q 'matrixportalx-ci-checker-qual' "$root_bg"; then
+              case "$root_bg" in
+                *.kts)
+                  printf '\n\n// matrixportalx-ci-checker-qual\nallprojects {\n    configurations.all {\n        resolutionStrategy {\n            force("org.checkerframework:checker-qual:3.49.5")\n        }\n    }\n}\n' >> "$root_bg"
+                  echo "checker-qual resolutionStrategy eklendi (kts)."
+                  ;;
+                *)
+                  printf "\n\n// matrixportalx-ci-checker-qual\nallprojects {\n    configurations.all {\n        resolutionStrategy {\n            force 'org.checkerframework:checker-qual:3.49.5'\n        }\n    }\n}\n" >> "$root_bg"
+                  echo "checker-qual resolutionStrategy eklendi (groovy)."
+                  ;;
+              esac
+            fi
+          fi
+
+      # ------------------------------------------------------------------
+      # 4) Firebase eklentisi varsa ama google-services.json yoksa Gradle
+      #    daha yapilandirma asamasinda patlar. Derlemenin gecmesi icin
+      #    yer tutucu yazilir.
+      #    DIKKAT: bu sahte dosyadir. Push bildirimi / Firebase oturum acma
+      #    ancak gercek google-services.json depoya eklenince calisir.
+      # ------------------------------------------------------------------
+      - name: Firebase yer tutucusu (gerekiyorsa)
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          if grep -rq "com.google.gms.google-services" android/ 2>/dev/null \
+             && [ ! -f android/app/google-services.json ]; then
+            pkg=$(grep -rhoE '(applicationId|namespace)[[:space:]=]+"[^"]+"' android/app/build.gradle* 2>/dev/null \
+                  | head -1 | grep -oE '"[^"]+"' | tr -d '"')
+            [ -z "$pkg" ] && pkg="com.example.app"
+            echo "::warning::google-services.json yok, CI icin yer tutucu yazildi. Firebase ozellikleri calismaz."
+            cat > android/app/google-services.json <<EOF
+          {
+            "project_info": {
+              "project_number": "000000000000",
+              "project_id": "ci-placeholder",
+              "storage_bucket": "ci-placeholder.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+                  "android_client_info": { "package_name": "$pkg" }
+                },
+                "oauth_client": [],
+                "api_key": [ { "current_key": "AIzaSyDUMMYKEYFORCIBUILDONLY0000000" } ],
+                "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+          else
+            echo "Firebase eklentisi yok ya da google-services.json zaten mevcut."
+          fi
+
+      # ------------------------------------------------------------------
+      # 5) Release imzalama - istege bagli.
+      #    Depo ayarlarinda su secrets tanimliysa gercek anahtarla imzalanir:
+      #      KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+      #    Tanimli degilse release yine denenir, cogu projede debug anahtarina
+      #    duser. Sadece telefona kurup denemek icin debug modu yeterlidir.
+      #
+      #    Parolalar bilerek GITHUB_ENV'e YAZILMAZ; oraya yazilan degerler
+      #    sonraki butun adimlara ve kullanilan ucuncu parti action'lara acilir.
+      # ------------------------------------------------------------------
+      - name: Imzalama anahtarini hazirla
+        if: inputs.mode == 'release'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::KEYSTORE_BASE64 secret'i tanimli degil; imzasiz/debug anahtariyla devam ediliyor."
+            exit 0
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # Flutter'in standart okuma bicimi. Dosya calisma agacinda kalir,
+          # is bitiminde siliniyor ve hicbir artifact'a dahil edilmiyor.
+          umask 077
+          cat > android/key.properties <<EOF
+          storeFile=$RUNNER_TEMP/release.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          echo "Imzalama anahtari hazir."
+
+      # ------------------------------------------------------------------
+      # 5b) pubspec.yaml'da bildirilmis ama depoda olmayan varliklar.
+      #     Bildirilen her klasor/dosya gercekten yoksa Flutter "Failed to
+      #     bundle asset files" ile durur. Klasorler ve bos dosyalar
+      #     olusturulur; yazi tipi dosyasi eksikse o aile pubspec'ten cikarilir
+      #     (bos bir .ttf calisma aninda hataya yol acar).
+      # ------------------------------------------------------------------
+      - name: Eksik varliklari (assets) tamamla
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          try:
+              import yaml
+          except ImportError:
+              os.system(f"{sys.executable} -m pip install --quiet pyyaml")
+              import yaml
+
+          path = "pubspec.yaml"
+          with open(path) as fh:
+              data = yaml.safe_load(fh) or {}
+          fl = data.get("flutter") or {}
+          created, changed = [], False
+
+          for entry in (fl.get("assets") or []):
+              if not isinstance(entry, str):
+                  continue
+              if entry.endswith("/"):
+                  if not os.path.isdir(entry):
+                      os.makedirs(entry, exist_ok=True)
+                      open(os.path.join(entry, ".gitkeep"), "w").close()
+                      created.append(entry)
+              elif not os.path.exists(entry):
+                  os.makedirs(os.path.dirname(entry) or ".", exist_ok=True)
+                  open(entry, "wb").close()
+                  created.append(entry)
+
+          fonts = fl.get("fonts")
+          if isinstance(fonts, list):
+              kept = []
+              for fam in fonts:
+                  if not isinstance(fam, dict):
+                      continue
+                  files = [e.get("asset") for e in (fam.get("fonts") or []) if isinstance(e, dict)]
+                  missing = [a for a in files if a and not os.path.exists(a)]
+                  if missing:
+                      print(f"::warning::Yazi tipi ailesi '{fam.get('family')}' pubspec'ten cikarildi; "
+                            f"dosyalar depoda yok: {', '.join(missing)}. Uygulama varsayilan yazi tipiyle derlenir.")
+                  else:
+                      kept.append(fam)
+              if len(kept) != len(fonts):
+                  if kept:
+                      fl["fonts"] = kept
+                  else:
+                      fl.pop("fonts", None)
+                  data["flutter"] = fl
+                  changed = True
+
+          if changed:
+              with open(path, "w") as fh:
+                  yaml.safe_dump(data, fh, sort_keys=False, allow_unicode=True)
+
+          for c in created:
+              print(f"  + {c}")
+          print(f"Olusturulan varlik yolu: {len(created)}")
+          PY
+
+      # pubspec'teki surum kisitlari eskiyse paketler guncel Android SDK'siyla
+      # derlenmez (ornek: flutter_local_notifications 15.x + Android 14 ->
+      # "reference to bigLargeIcon is ambiguous"). Yukseltme istege baglidir
+      # cunku ana surum atlamalari Dart kodunu bozabilir.
+      - name: Paketleri indir
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          IN_UPGRADE: ${{ inputs.upgrade_deps }}
+        run: |
+          if [ "$IN_UPGRADE" = "true" ]; then
+            echo "Bagimliliklar en son ana surumlere yukseltiliyor..."
+            flutter pub upgrade --major-versions
+          else
+            flutter pub get
+          fi
+
+      # Analiz bilgi amaclidir, derlemeyi durdurmaz.
+      - name: Statik analiz
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: flutter analyze || true
+
+      - name: APK derle
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          IN_MODE: ${{ inputs.mode }}
+          IN_FLAVOR: ${{ inputs.flavor }}
+          IN_SPLIT: ${{ inputs.split_per_abi }}
+          # System.getenv ile okuyan projeler icin
+          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          args=()
+          case "$IN_MODE" in
+            debug|release) args+=("--$IN_MODE") ;;
+            *) echo "::error::Gecersiz mode: $IN_MODE"; exit 1 ;;
+          esac
+          if [ -n "$IN_FLAVOR" ]; then
+            case "$IN_FLAVOR" in
+              [A-Za-z0-9_]*) args+=(--flavor "$IN_FLAVOR") ;;
+              *) echo "::error::Gecersiz flavor adi."; exit 1 ;;
+            esac
+          fi
+          [ "$IN_SPLIT" = "true" ] && args+=(--split-per-abi)
+          echo "flutter build apk ${args[*]}"
+          flutter build apk "${args[@]}"
+
+      - name: Imzalama dosyasini temizle
+        if: always()
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: rm -f android/key.properties "$RUNNER_TEMP/release.jks"
+
+      - name: APK'lari listele
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          ls -lh build/app/outputs/flutter-apk/*.apk
+          {
+            echo "### APK hazir"
+            echo ""
+            echo "| Dosya | Boyut |"
+            echo "|---|---|"
+            for f in build/app/outputs/flutter-apk/*.apk; do
+              echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo ""
+            echo "Bu sayfanin altindaki **Artifacts** bolumunden indirin."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.mode }}${{ inputs.flavor && format('-{0}', inputs.flavor) || '' }}
+          path: ${{ steps.detect.outputs.dir }}/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+          retention-days: 30
