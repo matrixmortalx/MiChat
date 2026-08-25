@@ -287,6 +287,31 @@ jobs:
           echo "compileSdk/targetSdk 34'e yukseltildi:"
           grep -E '(compileSdk|targetSdk)' "$bg" | head -5
 
+          # ------------------------------------------------------------------
+          # Tum alt projeleri (eklentiler) compileSdk 34'e zorla.
+          # Uygulamanin compileSdk'sini yukseltmek yetmez; eklentilerin kendi
+          # AAR metadata'sinda compileSdk = 33 yaziyorsa kontrol yine
+          # basarisiz olur. subprojects { afterEvaluate { ... } } ile
+          # tum alt projelerin android ext'i compileSdkVersion = 34 yapilir;
+          # boylece her eklenti yeniden derlenirken SDK 34'e cekilir.
+          # ------------------------------------------------------------------
+          root_bg=android/build.gradle
+          [ -f android/build.gradle.kts ] && root_bg=android/build.gradle.kts
+          if [ -f "$root_bg" ]; then
+            if ! grep -q 'matrixportalx-ci-subprojects-override' "$root_bg"; then
+              case "$root_bg" in
+                *.kts)
+                  printf '\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    afterEvaluate {\n        if (extensions.findByName("android") != null) {\n            extensions.configure(com.android.build.gradle.LibraryExtension::class.java) {\n                if (compileSdk != null && compileSdk!! < 34) {\n                    compileSdk = 34\n                }\n            }\n        }\n    }\n}\n' >> "$root_bg"
+                  echo "subprojects override eklendi (kts)."
+                  ;;
+                *)
+                  printf "\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    afterEvaluate { project ->\n        if (project.hasProperty('android')) {\n            project.android {\n                if (compileSdkVersion < 34) {\n                    compileSdkVersion 34\n                }\n            }\n        }\n    }\n}\n" >> "$root_bg"
+                  echo "subprojects override eklendi (groovy)."
+                  ;;
+              esac
+            fi
+          fi
+
       # ------------------------------------------------------------------
       # 4) Firebase eklentisi varsa ama google-services.json yoksa Gradle
       #    daha yapilandirma asamasinda patlar. Derlemenin gecmesi icin
