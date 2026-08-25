@@ -243,12 +243,7 @@ jobs:
                 echo "isCoreLibraryDesugaringEnabled=true eklendi (kts)."
               fi
               if ! grep -q 'desugar_jdk_libs' "$bg"; then
-                cat >> "$bg" <<'EOF'
-
-dependencies {
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
-}
-EOF
+                printf '\n\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> "$bg"
                 echo "desugar_jdk_libs bagimliligi eklendi (kts)."
               fi
               ;;
@@ -258,12 +253,7 @@ EOF
                 echo "coreLibraryDesugaringEnabled=true eklendi."
               fi
               if ! grep -q 'desugar_jdk_libs' "$bg"; then
-                cat >> "$bg" <<'EOF'
-
-dependencies {
-    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
-}
-EOF
+                printf "\n\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n" >> "$bg"
                 echo "desugar_jdk_libs bagimliligi eklendi."
               fi
               ;;
