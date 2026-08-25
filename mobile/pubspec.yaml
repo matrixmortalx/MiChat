@@ -29,7 +29,7 @@ dependencies:
   get_storage: ^2.1.1
 
   # Authentication
-  firebase_auth: ^4.6.0
+  firebase_auth: ^6.0.0
   google_sign_in: ^6.1.0
   # 5.0.0 Android v1 embedding kullanir; Flutter 3.x ile derlenmez.
   # 6.x v2 embedding'e gecti; Dart tarafinda bu paket henuz kullanilmiyor.
