@@ -219,6 +219,57 @@ jobs:
           fi
 
       # ------------------------------------------------------------------
+      # 3b) Core library desugaring.
+      #     flutter_local_notifications 17.x ve bazi yeni eklentiler
+      #     java.time API'sini kullanir; bu API Android < 26'da yoktur.
+      #     Derleme "Dependency requires core library desugaring to be
+      #     enabled" ile durur. Etkinleştirmek icin compileOptions'a
+      #     coreLibraryDesugaringEnabled=true ve dependencies'e
+      #     com.android.tools:desugar_jdk_libs eklenir.
+      # ------------------------------------------------------------------
+      - name: Android core library desugaring etkinleştir
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          bg=android/app/build.gradle
+          [ -f android/app/build.gradle.kts ] && bg=android/app/build.gradle.kts
+          if [ ! -f "$bg" ]; then
+            echo "build.gradle bulunamadi, desugaring atlanıyor."
+            exit 0
+          fi
+          case "$bg" in
+            *.kts)
+              if ! grep -q 'isCoreLibraryDesugaringEnabled' "$bg"; then
+                sed -i 's#compileOptions {#compileOptions {\n        isCoreLibraryDesugaringEnabled = true#' "$bg"
+                echo "isCoreLibraryDesugaringEnabled=true eklendi (kts)."
+              fi
+              if ! grep -q 'desugar_jdk_libs' "$bg"; then
+                cat >> "$bg" <<'EOF'
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+}
+EOF
+                echo "desugar_jdk_libs bagimliligi eklendi (kts)."
+              fi
+              ;;
+            *)
+              if ! grep -q 'coreLibraryDesugaringEnabled' "$bg"; then
+                sed -i 's#compileOptions {#compileOptions {\n        coreLibraryDesugaringEnabled true#' "$bg"
+                echo "coreLibraryDesugaringEnabled=true eklendi."
+              fi
+              if ! grep -q 'desugar_jdk_libs' "$bg"; then
+                cat >> "$bg" <<'EOF'
+
+dependencies {
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
+}
+EOF
+                echo "desugar_jdk_libs bagimliligi eklendi."
+              fi
+              ;;
+          esac
+
+      # ------------------------------------------------------------------
       # 4) Firebase eklentisi varsa ama google-services.json yoksa Gradle
       #    daha yapilandirma asamasinda patlar. Derlemenin gecmesi icin
       #    yer tutucu yazilir.
