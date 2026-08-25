@@ -130,33 +130,54 @@ jobs:
           tmp=$(mktemp -d)
           flutter create --platforms=android --project-name "$leaf" --org "$org" "$tmp/scaffold" >/dev/null
 
+          # Gradle "katmani": derlemeyi ayakta tutan yapilandirma dosyalari.
+          # Legacy modda bunlarin tamami iskeleden gelir - yarisi eski yarisi
+          # yeni bir katman Gradle'i "unsupported Gradle project" ile durdurur.
+          is_gradle_layer() {
+            case "$1" in
+              android/build.gradle|android/build.gradle.kts) return 0 ;;
+              android/settings.gradle|android/settings.gradle.kts) return 0 ;;
+              android/app/build.gradle|android/app/build.gradle.kts) return 0 ;;
+              android/gradle.properties|android/gradlew|android/gradlew.bat) return 0 ;;
+              android/gradle/wrapper/*) return 0 ;;
+            esac
+            return 1
+          }
+
           added=0; replaced=0
           while IFS= read -r f; do
             rel="${f#$tmp/scaffold/}"
 
-            # Ayni dizinde hem .gradle hem .gradle.kts olmasin
-            case "$rel" in
-              *.kts) [ -e "${rel%.kts}" ] && continue ;;
-              *.gradle) [ -e "${rel}.kts" ] && continue ;;
-            esac
-
             if [ ! -e "$rel" ]; then
+              # Bosluk doldurma modunda ayni dizinde iki DSL olusmasin
+              if [ "$legacy" = "0" ]; then
+                case "$rel" in
+                  *.kts) [ -e "${rel%.kts}" ] && continue ;;
+                  *.gradle) [ -e "${rel}.kts" ] && continue ;;
+                esac
+              fi
               mkdir -p "$(dirname "$rel")"
               cp "$f" "$rel"
               echo "  + $rel"
               added=$((added+1))
-            elif [ "$legacy" = "1" ]; then
-              # Sadece Gradle yapilandirma dosyalari icin gecerli
-              case "$rel" in
-                android/build.gradle|android/app/build.gradle|android/gradle.properties)
-                  cp "$rel" "$rel.bak-original"
-                  cp "$f" "$rel"
-                  echo "  ~ $rel (eskisi $rel.bak-original olarak saklandi)"
-                  replaced=$((replaced+1))
-                  ;;
-              esac
+            elif [ "$legacy" = "1" ] && is_gradle_layer "$rel"; then
+              cp "$rel" "$rel.bak-original"
+              cp "$f" "$rel"
+              echo "  ~ $rel (eskisi $rel.bak-original olarak saklandi)"
+              replaced=$((replaced+1))
             fi
           done < <(find "$tmp/scaffold/android" -type f)
+
+          # Legacy modda iskele .kts uretmisse eski Groovy esdegerini devre disi
+          # birak; ikisi ayni anda durursa Gradle hangisini okuyacagini bilemez.
+          if [ "$legacy" = "1" ]; then
+            for g in android/build.gradle android/app/build.gradle android/settings.gradle; do
+              if [ -f "$g" ] && [ -f "$g.kts" ]; then
+                mv "$g" "$g.bak-original"
+                echo "  - $g devre disi (${g}.bak-original)"
+              fi
+            done
+          fi
 
           # MainActivity dogru pakette mi? Iskele bizim adlandirmamizla urettigi
           # icin normalde dogrudur; yine de manifest'in bekledigi pakete tasi.
