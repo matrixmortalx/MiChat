@@ -29,6 +29,10 @@ on:
         type: boolean
         default: false
 
+# NOT: Kullanici girdileri hicbir yerde ${{ }} ile dogrudan kabuk betigine
+# gomulmez; env uzerinden gecirilip tirnak icinde kullanilir. Aksi halde
+# girdiye kabuk komutu yazilarak runner ele gecirilebilir.
+
 jobs:
   build:
     name: APK derle
@@ -44,17 +48,24 @@ jobs:
       # ------------------------------------------------------------------
       - name: Proje dizinini bul
         id: detect
+        env:
+          IN_PROJECT_DIR: ${{ inputs.project_dir }}
         run: |
-          if [ -n "${{ inputs.project_dir }}" ]; then
-            dir="${{ inputs.project_dir }}"
+          if [ -n "$IN_PROJECT_DIR" ]; then
+            dir="$IN_PROJECT_DIR"
           else
             dir=$(grep -rl --include=pubspec.yaml 'sdk: flutter' . 2>/dev/null \
                   | sed 's#/pubspec\.yaml$##; s#^\./##; s#^pubspec\.yaml$#.#' \
                   | awk '{n=gsub("/","/"); print n, $0}' | sort -n | head -1 | cut -d' ' -f2-)
           fi
           [ -z "$dir" ] && dir="."
+          # GITHUB_OUTPUT'a satir sonu enjeksiyonunu engelle
+          dir=$(printf '%s' "$dir" | tr -d '\n\r')
+          case "$dir" in
+            *['`$;&|<>()']*) echo "::error::project_dir gecersiz karakter iceriyor."; exit 1 ;;
+          esac
           if [ ! -f "$dir/pubspec.yaml" ]; then
-            echo "::error::pubspec.yaml bulunamadi. project_dir girdisiyle elle belirtin."
+            echo "::error::pubspec.yaml bulunamadi ($dir). project_dir girdisiyle elle belirtin."
             exit 1
           fi
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
@@ -76,8 +87,14 @@ jobs:
       # 2) Eksik Android iskelesini tamamla.
       #    AI ile uretilen depolarda cok siklikla gradlew, settings.gradle,
       #    MainActivity ve res/ eksiktir; bunlarsiz derleme hic baslamaz.
-      #    Temiz bir iskele gecici dizine uretilir ve SADECE eksik dosyalar
-      #    kopyalanir - var olan build.gradle gibi dosyalara dokunulmaz.
+      #
+      #    Iki calisma bicimi var:
+      #    - Bosluk doldurma (varsayilan): sadece eksik dosyalar kopyalanir,
+      #      var olan build.gradle gibi dosyalara dokunulmaz.
+      #    - Gradle katmanini yenileme: android/ icinde settings.gradle de
+      #      gradlew de yoksa o Gradle yapilandirmasi zaten hic calismamis
+      #      demektir; bu durumda Gradle dosyalari iskeleden alinir.
+      #      Manifest, res/ ve kaynak kodlar her hâlükârda korunur.
       # ------------------------------------------------------------------
       - name: Eksik Android dosyalarini tamamla
         working-directory: ${{ steps.detect.outputs.dir }}
@@ -85,33 +102,99 @@ jobs:
           name=$(awk '/^name:/{print $2; exit}' pubspec.yaml | tr -d "\"'" | tr '-' '_')
           [ -z "$name" ] && name=app
 
-          # Paket adini mevcut applicationId'den turet ki MainActivity dogru
-          # pakete yazilsin; yoksa com.example'a duser.
-          appid=$(grep -rhoE 'applicationId[[:space:]=]+"[^"]+"' android/app/build.gradle* 2>/dev/null \
+          # Paket adini mevcut applicationId/namespace'ten turet ki MainActivity
+          # dogru pakete yazilsin. Flutter paketi org + "." + proje adi olarak
+          # kurar; bu yuzden son parcayi proje adi, oncesini org yapiyoruz.
+          appid=$(grep -rhoE '(applicationId|namespace)[[:space:]=]+"[^"]+"' android/app/build.gradle* 2>/dev/null \
                   | head -1 | grep -oE '"[^"]+"' | tr -d '"')
-          if [ -n "$appid" ]; then org="${appid%.*}"; else org="com.example"; fi
-          echo "Proje adi: $name / paket: ${appid:-yok} / org: $org"
+          if [ -n "$appid" ]; then
+            org="${appid%.*}"
+            leaf="${appid##*.}"
+          else
+            org="com.example"; leaf="$name"
+          fi
+          # Dart paket adi kucuk harf/rakam/alt cizgi olmali ve rakamla baslamamali
+          case "$leaf" in
+            [a-z]*) : ;;
+            *) leaf="app" ;;
+          esac
+          echo "Paket: ${appid:-yok} | org: $org | iskele adi: $leaf"
+
+          legacy=0
+          if [ ! -f android/settings.gradle ] && [ ! -f android/settings.gradle.kts ] \
+             && [ ! -f android/gradlew ]; then
+            legacy=1
+            echo "::warning::android/ icinde settings.gradle ve gradlew yok - bu Gradle yapilandirmasi calisir durumda degil. Gradle katmani yeniden uretiliyor; productFlavors ve Firebase gradle eklentisi gibi elle yazilmis ayarlar gecerliligini yitirir."
+          fi
 
           tmp=$(mktemp -d)
-          flutter create --platforms=android --project-name "$name" --org "$org" "$tmp/scaffold" >/dev/null
+          flutter create --platforms=android --project-name "$leaf" --org "$org" "$tmp/scaffold" >/dev/null
 
-          added=0
+          added=0; replaced=0
           while IFS= read -r f; do
             rel="${f#$tmp/scaffold/}"
+
+            # Ayni dizinde hem .gradle hem .gradle.kts olmasin
+            case "$rel" in
+              *.kts) [ -e "${rel%.kts}" ] && continue ;;
+              *.gradle) [ -e "${rel}.kts" ] && continue ;;
+            esac
+
             if [ ! -e "$rel" ]; then
               mkdir -p "$(dirname "$rel")"
               cp "$f" "$rel"
               echo "  + $rel"
               added=$((added+1))
+            elif [ "$legacy" = "1" ]; then
+              # Sadece Gradle yapilandirma dosyalari icin gecerli
+              case "$rel" in
+                android/build.gradle|android/app/build.gradle|android/gradle.properties)
+                  cp "$rel" "$rel.bak-original"
+                  cp "$f" "$rel"
+                  echo "  ~ $rel (eskisi $rel.bak-original olarak saklandi)"
+                  replaced=$((replaced+1))
+                  ;;
+              esac
             fi
           done < <(find "$tmp/scaffold/android" -type f)
 
+          # MainActivity dogru pakette mi? Iskele bizim adlandirmamizla urettigi
+          # icin normalde dogrudur; yine de manifest'in bekledigi pakete tasi.
+          if [ -n "$appid" ]; then
+            want="android/app/src/main/kotlin/$(printf '%s' "$appid" | tr '.' '/')"
+            have=$(find android/app/src/main/kotlin android/app/src/main/java \
+                   -name 'MainActivity.kt' 2>/dev/null | head -1)
+            if [ -n "$have" ] && [ ! -f "$want/MainActivity.kt" ]; then
+              mkdir -p "$want"
+              sed "s/^package .*/package $appid/" "$have" > "$want/MainActivity.kt"
+              rm -f "$have"
+              echo "  > MainActivity $appid paketine tasindi"
+            fi
+          fi
+
           [ -f android/gradlew ] && chmod +x android/gradlew
           rm -rf "$tmp"
-          echo "Eklenen dosya sayisi: $added"
+          echo "Eklenen: $added, degistirilen: $replaced"
 
       # ------------------------------------------------------------------
-      # 3) Firebase eklentisi varsa ama google-services.json yoksa Gradle
+      # 3) Android v2 embedding isareti.
+      #    Elle yazilmis AndroidManifest.xml dosyalarinda bu meta-data cogu
+      #    zaman unutulur ve derleme "use of deleted Android v1 embedding"
+      #    hatasiyla durur.
+      # ------------------------------------------------------------------
+      - name: Android v2 embedding isaretini ekle
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          m=android/app/src/main/AndroidManifest.xml
+          if [ -f "$m" ] && ! grep -q 'flutterEmbedding' "$m"; then
+            sed -i 's#</application>#    <meta-data android:name="flutterEmbedding" android:value="2" />\n    </application>#' "$m"
+            echo "flutterEmbedding=2 eklendi."
+          else
+            echo "Gerekmedi."
+          fi
+
+      # ------------------------------------------------------------------
+      # 4) Firebase eklentisi varsa ama google-services.json yoksa Gradle
       #    daha yapilandirma asamasinda patlar. Derlemenin gecmesi icin
       #    yer tutucu yazilir.
       #    DIKKAT: bu sahte dosyadir. Push bildirimi / Firebase oturum acma
@@ -122,10 +205,10 @@ jobs:
         run: |
           if grep -rq "com.google.gms.google-services" android/ 2>/dev/null \
              && [ ! -f android/app/google-services.json ]; then
-            echo "::warning::google-services.json yok, CI icin yer tutucu yazildi. Firebase ozellikleri calismaz."
-            pkg=$(grep -rhoE 'applicationId[[:space:]=]+"[^"]+"' android/app/build.gradle* 2>/dev/null \
+            pkg=$(grep -rhoE '(applicationId|namespace)[[:space:]=]+"[^"]+"' android/app/build.gradle* 2>/dev/null \
                   | head -1 | grep -oE '"[^"]+"' | tr -d '"')
             [ -z "$pkg" ] && pkg="com.example.app"
+            echo "::warning::google-services.json yok, CI icin yer tutucu yazildi. Firebase ozellikleri calismaz."
             cat > android/app/google-services.json <<EOF
           {
             "project_info": {
@@ -152,11 +235,14 @@ jobs:
           fi
 
       # ------------------------------------------------------------------
-      # 4) Release imzalama - istege bagli.
+      # 5) Release imzalama - istege bagli.
       #    Depo ayarlarinda su secrets tanimliysa gercek anahtarla imzalanir:
       #      KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
       #    Tanimli degilse release yine denenir, cogu projede debug anahtarina
       #    duser. Sadece telefona kurup denemek icin debug modu yeterlidir.
+      #
+      #    Parolalar bilerek GITHUB_ENV'e YAZILMAZ; oraya yazilan degerler
+      #    sonraki butun adimlara ve kullanilan ucuncu parti action'lara acilir.
       # ------------------------------------------------------------------
       - name: Imzalama anahtarini hazirla
         if: inputs.mode == 'release'
@@ -168,23 +254,20 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "::warning::KEYSTORE_BASE64 secret'i tanimli degil, imzasiz/debug anahtariyla devam ediliyor."
+            echo "::warning::KEYSTORE_BASE64 secret'i tanimli degil; imzasiz/debug anahtariyla devam ediliyor."
             exit 0
           fi
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
-          # Iki yaygin okuma bicimini de destekle: key.properties ve ortam degiskeni
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # Flutter'in standart okuma bicimi. Dosya calisma agacinda kalir,
+          # is bitiminde siliniyor ve hicbir artifact'a dahil edilmiyor.
+          umask 077
           cat > android/key.properties <<EOF
           storeFile=$RUNNER_TEMP/release.jks
           storePassword=$KEYSTORE_PASSWORD
           keyAlias=$KEY_ALIAS
           keyPassword=$KEY_PASSWORD
           EOF
-          {
-            echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
-            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
-            echo "KEY_ALIAS=$KEY_ALIAS"
-            echo "KEY_PASSWORD=$KEY_PASSWORD"
-          } >> "$GITHUB_ENV"
+          echo "Imzalama anahtari hazir."
 
       - name: Paketleri indir
         working-directory: ${{ steps.detect.outputs.dir }}
@@ -196,17 +279,38 @@ jobs:
         run: flutter analyze || true
 
       - name: APK derle
-        id: build
         working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          IN_MODE: ${{ inputs.mode }}
+          IN_FLAVOR: ${{ inputs.flavor }}
+          IN_SPLIT: ${{ inputs.split_per_abi }}
+          # System.getenv ile okuyan projeler icin
+          KEYSTORE_PATH: ${{ runner.temp }}/release.jks
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          args="--${{ inputs.mode }}"
-          [ -n "${{ inputs.flavor }}" ] && args="$args --flavor ${{ inputs.flavor }}"
-          [ "${{ inputs.split_per_abi }}" = "true" ] && args="$args --split-per-abi"
-          echo "flutter build apk $args"
-          flutter build apk $args
+          args=()
+          case "$IN_MODE" in
+            debug|release) args+=("--$IN_MODE") ;;
+            *) echo "::error::Gecersiz mode: $IN_MODE"; exit 1 ;;
+          esac
+          if [ -n "$IN_FLAVOR" ]; then
+            case "$IN_FLAVOR" in
+              [A-Za-z0-9_]*) args+=(--flavor "$IN_FLAVOR") ;;
+              *) echo "::error::Gecersiz flavor adi."; exit 1 ;;
+            esac
+          fi
+          [ "$IN_SPLIT" = "true" ] && args+=(--split-per-abi)
+          echo "flutter build apk ${args[*]}"
+          flutter build apk "${args[@]}"
+
+      - name: Imzalama dosyasini temizle
+        if: always()
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: rm -f android/key.properties "$RUNNER_TEMP/release.jks"
 
       - name: APK'lari listele
-        id: apks
         working-directory: ${{ steps.detect.outputs.dir }}
         run: |
           ls -lh build/app/outputs/flutter-apk/*.apk
