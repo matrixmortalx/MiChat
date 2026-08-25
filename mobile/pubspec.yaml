@@ -29,12 +29,12 @@ dependencies:
   get_storage: ^2.1.1
 
   # Authentication
-  firebase_auth: ^4.6.0
+  firebase_auth: ">=4.6.0 <6.6.0"
   google_sign_in: ^6.1.0
   sign_in_with_apple: ^5.0.0
 
   # Push Notifications
-  firebase_messaging: ^14.6.0
+  firebase_messaging: ">=14.6.0 <16.0.0"
   flutter_local_notifications: ^15.0.0
 
   # UI Components
@@ -52,13 +52,13 @@ dependencies:
   uuid: ^3.0.7
   logger: ^2.0.0
   connectivity_plus: ^5.0.0
-  permission_handler: ^11.4.0
+  permission_handler: ">=11.4.0 <12.0.0"
   video_player: ^2.7.0
   camera: ^0.10.5
 
   # Firebase
-  firebase_core: ^2.13.0
-  firebase_storage: ^11.2.0
+  firebase_core: ">=2.13.0 <3.0.0"
+  firebase_storage: ">=11.2.0 <13.0.0"
 
 dev_dependencies:
   flutter_test:
