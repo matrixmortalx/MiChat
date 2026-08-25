@@ -55,7 +55,7 @@ dependencies:
   # Utilities
   uuid: ^3.0.7
   logger: ^2.0.0
-  connectivity_plus: ^5.0.0
+  connectivity_plus: ^6.0.0
   permission_handler: ^11.4.0
   video_player: ^2.7.0
   camera: ^0.10.5
