@@ -28,6 +28,10 @@ on:
         description: 'Mimari basina ayri APK (daha kucuk dosya)'
         type: boolean
         default: false
+      upgrade_deps:
+        description: 'Bagimliliklari en son ana surumlere yukselt (eski/uyumsuz surum hatalarinda)'
+        type: boolean
+        default: false
 
 # NOT: Kullanici girdileri hicbir yerde ${{ }} ile dogrudan kabuk betigine
 # gomulmez; env uzerinden gecirilip tirnak icinde kullanilir. Aksi halde
@@ -357,9 +361,21 @@ jobs:
           print(f"Olusturulan varlik yolu: {len(created)}")
           PY
 
+      # pubspec'teki surum kisitlari eskiyse paketler guncel Android SDK'siyla
+      # derlenmez (ornek: flutter_local_notifications 15.x + Android 14 ->
+      # "reference to bigLargeIcon is ambiguous"). Yukseltme istege baglidir
+      # cunku ana surum atlamalari Dart kodunu bozabilir.
       - name: Paketleri indir
         working-directory: ${{ steps.detect.outputs.dir }}
-        run: flutter pub get
+        env:
+          IN_UPGRADE: ${{ inputs.upgrade_deps }}
+        run: |
+          if [ "$IN_UPGRADE" = "true" ]; then
+            echo "Bagimliliklar en son ana surumlere yukseltiliyor..."
+            flutter pub upgrade --major-versions
+          else
+            flutter pub get
+          fi
 
       # Analiz bilgi amaclidir, derlemeyi durdurmaz.
       - name: Statik analiz
