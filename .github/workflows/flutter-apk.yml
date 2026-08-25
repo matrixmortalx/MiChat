@@ -324,6 +324,26 @@ jobs:
                   ;;
               esac
             fi
+            # ------------------------------------------------------------------
+            # firebase_auth 6.6.0 checker-qual workaround (FlutterFire #18608).
+            # Uygulamanin compileOnly'si plugin classpath'ine ulasmiyor;
+            # tum alt projelerin tum konfigurasyonlarina resolutionStrategy
+            # ile checker-qual enjekte edilir. Boylece Kotlin derleyicisi
+            # firebase_auth kaynak kodundaki @UnknownInitialization
+            # referansini cozebilir.
+            # ------------------------------------------------------------------
+            if ! grep -q 'matrixportalx-ci-checker-qual' "$root_bg"; then
+              case "$root_bg" in
+                *.kts)
+                  printf '\n\n// matrixportalx-ci-checker-qual\nallprojects {\n    configurations.all {\n        resolutionStrategy {\n            force("org.checkerframework:checker-qual:3.49.5")\n        }\n    }\n}\n' >> "$root_bg"
+                  echo "checker-qual resolutionStrategy eklendi (kts)."
+                  ;;
+                *)
+                  printf "\n\n// matrixportalx-ci-checker-qual\nallprojects {\n    configurations.all {\n        resolutionStrategy {\n            force 'org.checkerframework:checker-qual:3.49.5'\n        }\n    }\n}\n" >> "$root_bg"
+                  echo "checker-qual resolutionStrategy eklendi (groovy)."
+                  ;;
+              esac
+            fi
           fi
 
       # ------------------------------------------------------------------
