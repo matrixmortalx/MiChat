@@ -290,6 +290,73 @@ jobs:
           EOF
           echo "Imzalama anahtari hazir."
 
+      # ------------------------------------------------------------------
+      # 5b) pubspec.yaml'da bildirilmis ama depoda olmayan varliklar.
+      #     Bildirilen her klasor/dosya gercekten yoksa Flutter "Failed to
+      #     bundle asset files" ile durur. Klasorler ve bos dosyalar
+      #     olusturulur; yazi tipi dosyasi eksikse o aile pubspec'ten cikarilir
+      #     (bos bir .ttf calisma aninda hataya yol acar).
+      # ------------------------------------------------------------------
+      - name: Eksik varliklari (assets) tamamla
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          try:
+              import yaml
+          except ImportError:
+              os.system(f"{sys.executable} -m pip install --quiet pyyaml")
+              import yaml
+
+          path = "pubspec.yaml"
+          with open(path) as fh:
+              data = yaml.safe_load(fh) or {}
+          fl = data.get("flutter") or {}
+          created, changed = [], False
+
+          for entry in (fl.get("assets") or []):
+              if not isinstance(entry, str):
+                  continue
+              if entry.endswith("/"):
+                  if not os.path.isdir(entry):
+                      os.makedirs(entry, exist_ok=True)
+                      open(os.path.join(entry, ".gitkeep"), "w").close()
+                      created.append(entry)
+              elif not os.path.exists(entry):
+                  os.makedirs(os.path.dirname(entry) or ".", exist_ok=True)
+                  open(entry, "wb").close()
+                  created.append(entry)
+
+          fonts = fl.get("fonts")
+          if isinstance(fonts, list):
+              kept = []
+              for fam in fonts:
+                  if not isinstance(fam, dict):
+                      continue
+                  files = [e.get("asset") for e in (fam.get("fonts") or []) if isinstance(e, dict)]
+                  missing = [a for a in files if a and not os.path.exists(a)]
+                  if missing:
+                      print(f"::warning::Yazi tipi ailesi '{fam.get('family')}' pubspec'ten cikarildi; "
+                            f"dosyalar depoda yok: {', '.join(missing)}. Uygulama varsayilan yazi tipiyle derlenir.")
+                  else:
+                      kept.append(fam)
+              if len(kept) != len(fonts):
+                  if kept:
+                      fl["fonts"] = kept
+                  else:
+                      fl.pop("fonts", None)
+                  data["flutter"] = fl
+                  changed = True
+
+          if changed:
+              with open(path, "w") as fh:
+                  yaml.safe_dump(data, fh, sort_keys=False, allow_unicode=True)
+
+          for c in created:
+              print(f"  + {c}")
+          print(f"Olusturulan varlik yolu: {len(created)}")
+          PY
+
       - name: Paketleri indir
         working-directory: ${{ steps.detect.outputs.dir }}
         run: flutter pub get
