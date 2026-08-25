@@ -219,6 +219,134 @@ jobs:
           fi
 
       # ------------------------------------------------------------------
+      # 3b) Core library desugaring.
+      #     flutter_local_notifications 17.x ve bazi yeni eklentiler
+      #     java.time API'sini kullanir; bu API Android < 26'da yoktur.
+      #     Derleme "Dependency requires core library desugaring to be
+      #     enabled" ile durur. Etkinleştirmek icin compileOptions'a
+      #     coreLibraryDesugaringEnabled=true ve dependencies'e
+      #     com.android.tools:desugar_jdk_libs eklenir.
+      # ------------------------------------------------------------------
+      - name: Android core library desugaring etkinleştir
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          bg=android/app/build.gradle
+          [ -f android/app/build.gradle.kts ] && bg=android/app/build.gradle.kts
+          if [ ! -f "$bg" ]; then
+            echo "build.gradle bulunamadi, desugaring atlanıyor."
+            exit 0
+          fi
+          case "$bg" in
+            *.kts)
+              if ! grep -q 'isCoreLibraryDesugaringEnabled' "$bg"; then
+                sed -i 's#compileOptions {#compileOptions {\n        isCoreLibraryDesugaringEnabled = true#' "$bg"
+                echo "isCoreLibraryDesugaringEnabled=true eklendi (kts)."
+              fi
+              if ! grep -q 'desugar_jdk_libs' "$bg"; then
+                printf '\n\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> "$bg"
+                echo "desugar_jdk_libs bagimliligi eklendi (kts)."
+              fi
+              # checker-qual: firebase_auth 6.6.0+ Kotlin kodunda
+              # @UnknownInitialization kullaniyor; paket bunu transitif
+              # olarak getirmiyor. compileOnly ekleyerek Kotlin'in cozumu
+              # icin sinifi gorunur kil, ama APK'ya dahil etme.
+              if ! grep -q 'checker-qual' "$bg"; then
+                printf '\n\ndependencies {\n    compileOnly("org.checkerframework:checker-qual:3.49.5")\n}\n' >> "$bg"
+                echo "checker-qual (compileOnly) eklendi (kts)."
+              fi
+              ;;
+            *)
+              if ! grep -q 'coreLibraryDesugaringEnabled' "$bg"; then
+                sed -i 's#compileOptions {#compileOptions {\n        coreLibraryDesugaringEnabled true#' "$bg"
+                echo "coreLibraryDesugaringEnabled=true eklendi."
+              fi
+              if ! grep -q 'desugar_jdk_libs' "$bg"; then
+                printf "\n\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n" >> "$bg"
+                echo "desugar_jdk_libs bagimliligi eklendi."
+              fi
+              if ! grep -q 'checker-qual' "$bg"; then
+                printf "\n\ndependencies {\n    compileOnly 'org.checkerframework:checker-qual:3.49.5'\n}\n" >> "$bg"
+                echo "checker-qual (compileOnly) eklendi."
+              fi
+              ;;
+          esac
+
+      # ------------------------------------------------------------------
+      # 3c) compileSdk / targetSdk'yi 34+'a yukselt.
+      #     Modern eklentilerin AndroidX bagimliliklari (fragment 1.7+,
+      #     activity 1.9+ vb.) compileSdk >= 34 istiyor. Flutter iskele
+      #     sablonu bazi durumlarda 33 ile gelir; AAR metadata kontrolu
+      #     "Dependency requires libraries to compile against version 34
+      #     or later" ile derlemeyi durdurur. 34 ile AGP 7.4+ uyumlu,
+      #     daha yeni Gradle'lar 36 kaldirir; bu nedenle Flutter SDK'sinin
+      #     izin verdigi en dusuk modern deger olan 34 sectik.
+      # ------------------------------------------------------------------
+      - name: compileSdk / targetSdk'yi 34'e yukselt
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          bg=android/app/build.gradle
+          [ -f android/app/build.gradle.kts ] && bg=android/app/build.gradle.kts
+          if [ ! -f "$bg" ]; then
+            echo "build.gradle bulunamadi, atlanıyor."
+            exit 0
+          fi
+          # Groovy: compileSdkVersion N / targetSdkVersion N
+          sed -i -E 's#(compileSdkVersion)[[:space:]]+[0-9]+#\1 34#g' "$bg"
+          sed -i -E 's#(targetSdkVersion)[[:space:]]+[0-9]+#\1 34#g' "$bg"
+          # Kotlin DSL: compileSdk = N / targetSdk = N
+          sed -i -E 's#(compileSdk)[[:space:]]*=[[:space:]]*[0-9]+#\1 = 34#g' "$bg"
+          sed -i -E 's#(targetSdk)[[:space:]]*=[[:space:]]*[0-9]+#\1 = 34#g' "$bg"
+          echo "compileSdk/targetSdk 34'e yukseltildi:"
+          grep -E '(compileSdk|targetSdk)' "$bg" | head -5
+
+          # ------------------------------------------------------------------
+          # Tum alt projeleri (eklentiler) compileSdk 34'e zorla.
+          # Uygulamanin compileSdk'sini yukseltmek yetmez; eklentilerin kendi
+          # AAR metadata'sinda compileSdk = 33 yaziyorsa kontrol yine
+          # basarisiz olur. subprojects { plugins.withType { ... } } ile
+          # her android library eklentisinin compileSdk degeri 34'e cekilir;
+          # boylece eklentiler yeniden derlenirken AAR metadata SDK 34'e
+          # guncellenir. plugins.withType, afterEvaluate'e gore daha erken
+          # calistigi icin "already evaluated" hatasina dusmez.
+          # ------------------------------------------------------------------
+          root_bg=android/build.gradle
+          [ -f android/build.gradle.kts ] && root_bg=android/build.gradle.kts
+          if [ -f "$root_bg" ]; then
+            if ! grep -q 'matrixportalx-ci-subprojects-override' "$root_bg"; then
+              case "$root_bg" in
+                *.kts)
+                  printf '\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    plugins.withType<com.android.build.gradle.LibraryPlugin> {\n        extensions.configure<com.android.build.gradle.LibraryExtension>("android") {\n            if (compileSdk == null || compileSdk!! < 34) {\n                compileSdk = 34\n            }\n        }\n    }\n}\n' >> "$root_bg"
+                  echo "subprojects override eklendi (kts)."
+                  ;;
+                *)
+                  printf "\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    plugins.withType(com.android.build.gradle.LibraryPlugin) {\n        project.android {\n            if (compileSdkVersion == null || compileSdkVersion < 34) {\n                compileSdkVersion 34\n            }\n        }\n    }\n}\n" >> "$root_bg"
+                  echo "subprojects override eklendi (groovy)."
+                  ;;
+              esac
+            fi
+            # ------------------------------------------------------------------
+            # firebase_auth 6.6.0 checker-qual workaround (FlutterFire #18608).
+            # Uygulamanin compileOnly'si plugin classpath'ine ulasmiyor;
+            # tum alt projelerin tum konfigurasyonlarina resolutionStrategy
+            # ile checker-qual enjekte edilir. Boylece Kotlin derleyicisi
+            # firebase_auth kaynak kodundaki @UnknownInitialization
+            # referansini cozebilir.
+            # ------------------------------------------------------------------
+            if ! grep -q 'matrixportalx-ci-checker-qual' "$root_bg"; then
+              case "$root_bg" in
+                *.kts)
+                  printf '\n\n// matrixportalx-ci-checker-qual\nallprojects {\n    configurations.all {\n        resolutionStrategy {\n            force("org.checkerframework:checker-qual:3.49.5")\n        }\n    }\n}\n' >> "$root_bg"
+                  echo "checker-qual resolutionStrategy eklendi (kts)."
+                  ;;
+                *)
+                  printf "\n\n// matrixportalx-ci-checker-qual\nallprojects {\n    configurations.all {\n        resolutionStrategy {\n            force 'org.checkerframework:checker-qual:3.49.5'\n        }\n    }\n}\n" >> "$root_bg"
+                  echo "checker-qual resolutionStrategy eklendi (groovy)."
+                  ;;
+              esac
+            fi
+          fi
+
+      # ------------------------------------------------------------------
       # 4) Firebase eklentisi varsa ama google-services.json yoksa Gradle
       #    daha yapilandirma asamasinda patlar. Derlemenin gecmesi icin
       #    yer tutucu yazilir.
