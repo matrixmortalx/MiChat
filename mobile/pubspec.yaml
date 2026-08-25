@@ -29,17 +29,13 @@ dependencies:
   get_storage: ^2.1.1
 
   # Authentication
-  firebase_auth: ">=6.0.0 <6.6.0"
+  firebase_auth: ^4.6.0
   google_sign_in: ^6.1.0
-  # 5.0.0 Android v1 embedding kullanir; Flutter 3.x ile derlenmez.
-  # 6.x v2 embedding'e gecti; Dart tarafinda bu paket henuz kullanilmiyor.
-  sign_in_with_apple: ^6.1.0
+  sign_in_with_apple: ^5.0.0
 
   # Push Notifications
-  firebase_messaging: ^16.5.0
-  # 15.x derlenmiyor (Android 14 BigPictureStyle.bigLargeIcon belirsiz).
-  # 16.x+ ile duzeldi; Dart tarafinda bu paket henuz kullanilmiyor.
-  flutter_local_notifications: ^17.0.0
+  firebase_messaging: ^14.6.0
+  flutter_local_notifications: ^15.0.0
 
   # UI Components
   flutter_markdown: ^0.6.10
@@ -55,14 +51,14 @@ dependencies:
   # Utilities
   uuid: ^3.0.7
   logger: ^2.0.0
-  connectivity_plus: ^6.0.0
+  connectivity_plus: ^5.0.0
   permission_handler: ^11.4.0
   video_player: ^2.7.0
   camera: ^0.10.5
 
   # Firebase
-  firebase_core: ">=4.13.0 <4.14.0"
-  firebase_storage: ^13.0.0
+  firebase_core: ^2.13.0
+  firebase_storage: ^11.2.0
 
 dev_dependencies:
   flutter_test:
@@ -71,24 +67,6 @@ dev_dependencies:
   flutter_lints: ^3.0.0
   build_runner: ^2.4.0
   hive_generator: ^2.0.0
-
-# firebase_auth 6.6.0 (23 saat once yayinda) Kotlin kodunda
-# org.checkerframework.checker.initialization.qual.UnknownInitialization
-# referansi icin checker-qual bagimliligini transitif olarak getirmiyor
-# (FlutterFire #18608). flutter pub upgrade --major-versions bu surume
-# gecmeye calisip Kotlin derlemeyi kirariyor; --major-versions
-# dependency_overrides'i ezemedigi icin burada 6.5.x'e sabitliyoruz.
-# firebase_core 4.14.0 ise FlutterFirebaseCorePlugin.customAuthDomain
-# alanini kaldirmis; firebase_auth 6.5.7 onu kullanir. Bu nedenle
-# firebase_core da 4.13.0'a sabitlenmeli; yoksa upgrade_deps ile
-# 4.14.0'a gecilip "cannot find symbol" hatasina dusuluyor.
-# Duzeltme yukari akisa ulasirsa bu override kaldirilabilir.
-dependency_overrides:
-  firebase_auth: 6.5.7
-  firebase_core: 4.13.0
-  # permission_handler 13.x -> permission_handler_android 14.x, Android
-  # SDK 37 istiyor; mevcut AGP/compileSdk (34) bunu kaldirmiyor.
-  permission_handler: 11.4.0
 
 flutter:
   uses-material-design: true
