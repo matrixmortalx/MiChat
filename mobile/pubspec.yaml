@@ -78,9 +78,14 @@ dev_dependencies:
 # (FlutterFire #18608). flutter pub upgrade --major-versions bu surume
 # gecmeye calisip Kotlin derlemeyi kirariyor; --major-versions
 # dependency_overrides'i ezemedigi icin burada 6.5.x'e sabitliyoruz.
+# firebase_core 4.14.0 ise FlutterFirebaseCorePlugin.customAuthDomain
+# alanini kaldirmis; firebase_auth 6.5.7 onu kullanir. Bu nedenle
+# firebase_core da 4.13.0'a sabitlenmeli; yoksa upgrade_deps ile
+# 4.14.0'a gecilip "cannot find symbol" hatasina dusuluyor.
 # Duzeltme yukari akisa ulasirsa bu override kaldirilabilir.
 dependency_overrides:
   firebase_auth: 6.5.7
+  firebase_core: 4.13.0
 
 flutter:
   uses-material-design: true
