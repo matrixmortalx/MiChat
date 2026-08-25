@@ -61,8 +61,8 @@ dependencies:
   camera: ^0.10.5
 
   # Firebase
-  firebase_core: ^2.13.0
-  firebase_storage: ^11.2.0
+  firebase_core: ^4.0.0
+  firebase_storage: ^13.0.0
 
 dev_dependencies:
   flutter_test:
