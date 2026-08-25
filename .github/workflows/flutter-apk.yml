@@ -246,6 +246,14 @@ jobs:
                 printf '\n\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n' >> "$bg"
                 echo "desugar_jdk_libs bagimliligi eklendi (kts)."
               fi
+              # checker-qual: firebase_auth 6.6.0+ Kotlin kodunda
+              # @UnknownInitialization kullaniyor; paket bunu transitif
+              # olarak getirmiyor. compileOnly ekleyerek Kotlin'in cozumu
+              # icin sinifi gorunur kil, ama APK'ya dahil etme.
+              if ! grep -q 'checker-qual' "$bg"; then
+                printf '\n\ndependencies {\n    compileOnly("org.checkerframework:checker-qual:3.49.5")\n}\n' >> "$bg"
+                echo "checker-qual (compileOnly) eklendi (kts)."
+              fi
               ;;
             *)
               if ! grep -q 'coreLibraryDesugaringEnabled' "$bg"; then
@@ -255,6 +263,10 @@ jobs:
               if ! grep -q 'desugar_jdk_libs' "$bg"; then
                 printf "\n\ndependencies {\n    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'\n}\n" >> "$bg"
                 echo "desugar_jdk_libs bagimliligi eklendi."
+              fi
+              if ! grep -q 'checker-qual' "$bg"; then
+                printf "\n\ndependencies {\n    compileOnly 'org.checkerframework:checker-qual:3.49.5'\n}\n" >> "$bg"
+                echo "checker-qual (compileOnly) eklendi."
               fi
               ;;
           esac
