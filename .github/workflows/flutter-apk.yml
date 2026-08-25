@@ -1,0 +1,230 @@
+name: Flutter APK
+
+# Herhangi bir Flutter projesinden kurulabilir APK ureten genel amacli sablon.
+# .github/workflows/flutter-apk.yml olarak depoya kopyalanir, baska ayar gerekmez.
+# Calistirmak icin: GitHub > Actions > Flutter APK > Run workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Derleme turu'
+        type: choice
+        options: [debug, release]
+        default: debug
+      flavor:
+        description: 'Product flavor (build.gradle icinde productFlavors varsa; ornek: dev)'
+        type: string
+        default: ''
+      project_dir:
+        description: 'pubspec.yaml dizini (bos birakilirsa otomatik bulunur)'
+        type: string
+        default: ''
+      flutter_version:
+        description: 'Flutter surumu (bos = en son stable)'
+        type: string
+        default: ''
+      split_per_abi:
+        description: 'Mimari basina ayri APK (daha kucuk dosya)'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: APK derle
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1) Flutter projesinin nerede oldugunu bul.
+      #    Depo kokunde olabilir, mobile/ app/ client/ gibi bir alt dizinde de.
+      # ------------------------------------------------------------------
+      - name: Proje dizinini bul
+        id: detect
+        run: |
+          if [ -n "${{ inputs.project_dir }}" ]; then
+            dir="${{ inputs.project_dir }}"
+          else
+            dir=$(grep -rl --include=pubspec.yaml 'sdk: flutter' . 2>/dev/null \
+                  | sed 's#/pubspec\.yaml$##; s#^\./##; s#^pubspec\.yaml$#.#' \
+                  | awk '{n=gsub("/","/"); print n, $0}' | sort -n | head -1 | cut -d' ' -f2-)
+          fi
+          [ -z "$dir" ] && dir="."
+          if [ ! -f "$dir/pubspec.yaml" ]; then
+            echo "::error::pubspec.yaml bulunamadi. project_dir girdisiyle elle belirtin."
+            exit 1
+          fi
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "Flutter projesi: $dir"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ inputs.flutter_version }}
+          cache: true
+
+      # ------------------------------------------------------------------
+      # 2) Eksik Android iskelesini tamamla.
+      #    AI ile uretilen depolarda cok siklikla gradlew, settings.gradle,
+      #    MainActivity ve res/ eksiktir; bunlarsiz derleme hic baslamaz.
+      #    Temiz bir iskele gecici dizine uretilir ve SADECE eksik dosyalar
+      #    kopyalanir - var olan build.gradle gibi dosyalara dokunulmaz.
+      # ------------------------------------------------------------------
+      - name: Eksik Android dosyalarini tamamla
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          name=$(awk '/^name:/{print $2; exit}' pubspec.yaml | tr -d "\"'" | tr '-' '_')
+          [ -z "$name" ] && name=app
+
+          # Paket adini mevcut applicationId'den turet ki MainActivity dogru
+          # pakete yazilsin; yoksa com.example'a duser.
+          appid=$(grep -rhoE 'applicationId[[:space:]=]+"[^"]+"' android/app/build.gradle* 2>/dev/null \
+                  | head -1 | grep -oE '"[^"]+"' | tr -d '"')
+          if [ -n "$appid" ]; then org="${appid%.*}"; else org="com.example"; fi
+          echo "Proje adi: $name / paket: ${appid:-yok} / org: $org"
+
+          tmp=$(mktemp -d)
+          flutter create --platforms=android --project-name "$name" --org "$org" "$tmp/scaffold" >/dev/null
+
+          added=0
+          while IFS= read -r f; do
+            rel="${f#$tmp/scaffold/}"
+            if [ ! -e "$rel" ]; then
+              mkdir -p "$(dirname "$rel")"
+              cp "$f" "$rel"
+              echo "  + $rel"
+              added=$((added+1))
+            fi
+          done < <(find "$tmp/scaffold/android" -type f)
+
+          [ -f android/gradlew ] && chmod +x android/gradlew
+          rm -rf "$tmp"
+          echo "Eklenen dosya sayisi: $added"
+
+      # ------------------------------------------------------------------
+      # 3) Firebase eklentisi varsa ama google-services.json yoksa Gradle
+      #    daha yapilandirma asamasinda patlar. Derlemenin gecmesi icin
+      #    yer tutucu yazilir.
+      #    DIKKAT: bu sahte dosyadir. Push bildirimi / Firebase oturum acma
+      #    ancak gercek google-services.json depoya eklenince calisir.
+      # ------------------------------------------------------------------
+      - name: Firebase yer tutucusu (gerekiyorsa)
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          if grep -rq "com.google.gms.google-services" android/ 2>/dev/null \
+             && [ ! -f android/app/google-services.json ]; then
+            echo "::warning::google-services.json yok, CI icin yer tutucu yazildi. Firebase ozellikleri calismaz."
+            pkg=$(grep -rhoE 'applicationId[[:space:]=]+"[^"]+"' android/app/build.gradle* 2>/dev/null \
+                  | head -1 | grep -oE '"[^"]+"' | tr -d '"')
+            [ -z "$pkg" ] && pkg="com.example.app"
+            cat > android/app/google-services.json <<EOF
+          {
+            "project_info": {
+              "project_number": "000000000000",
+              "project_id": "ci-placeholder",
+              "storage_bucket": "ci-placeholder.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+                  "android_client_info": { "package_name": "$pkg" }
+                },
+                "oauth_client": [],
+                "api_key": [ { "current_key": "AIzaSyDUMMYKEYFORCIBUILDONLY0000000" } ],
+                "services": { "appinvite_service": { "other_platform_oauth_client": [] } }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+          else
+            echo "Firebase eklentisi yok ya da google-services.json zaten mevcut."
+          fi
+
+      # ------------------------------------------------------------------
+      # 4) Release imzalama - istege bagli.
+      #    Depo ayarlarinda su secrets tanimliysa gercek anahtarla imzalanir:
+      #      KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
+      #    Tanimli degilse release yine denenir, cogu projede debug anahtarina
+      #    duser. Sadece telefona kurup denemek icin debug modu yeterlidir.
+      # ------------------------------------------------------------------
+      - name: Imzalama anahtarini hazirla
+        if: inputs.mode == 'release'
+        working-directory: ${{ steps.detect.outputs.dir }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::warning::KEYSTORE_BASE64 secret'i tanimli degil, imzasiz/debug anahtariyla devam ediliyor."
+            exit 0
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # Iki yaygin okuma bicimini de destekle: key.properties ve ortam degiskeni
+          cat > android/key.properties <<EOF
+          storeFile=$RUNNER_TEMP/release.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+          {
+            echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks"
+            echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "KEY_ALIAS=$KEY_ALIAS"
+            echo "KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Paketleri indir
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: flutter pub get
+
+      # Analiz bilgi amaclidir, derlemeyi durdurmaz.
+      - name: Statik analiz
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: flutter analyze || true
+
+      - name: APK derle
+        id: build
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          args="--${{ inputs.mode }}"
+          [ -n "${{ inputs.flavor }}" ] && args="$args --flavor ${{ inputs.flavor }}"
+          [ "${{ inputs.split_per_abi }}" = "true" ] && args="$args --split-per-abi"
+          echo "flutter build apk $args"
+          flutter build apk $args
+
+      - name: APK'lari listele
+        id: apks
+        working-directory: ${{ steps.detect.outputs.dir }}
+        run: |
+          ls -lh build/app/outputs/flutter-apk/*.apk
+          {
+            echo "### APK hazir"
+            echo ""
+            echo "| Dosya | Boyut |"
+            echo "|---|---|"
+            for f in build/app/outputs/flutter-apk/*.apk; do
+              echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"
+            done
+            echo ""
+            echo "Bu sayfanin altindaki **Artifacts** bolumunden indirin."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.mode }}${{ inputs.flavor && format('-{0}', inputs.flavor) || '' }}
+          path: ${{ steps.detect.outputs.dir }}/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
+          retention-days: 30
