@@ -291,9 +291,11 @@ jobs:
           # Tum alt projeleri (eklentiler) compileSdk 34'e zorla.
           # Uygulamanin compileSdk'sini yukseltmek yetmez; eklentilerin kendi
           # AAR metadata'sinda compileSdk = 33 yaziyorsa kontrol yine
-          # basarisiz olur. subprojects { afterEvaluate { ... } } ile
-          # tum alt projelerin android ext'i compileSdkVersion = 34 yapilir;
-          # boylece her eklenti yeniden derlenirken SDK 34'e cekilir.
+          # basarisiz olur. subprojects { plugins.withType { ... } } ile
+          # her android library eklentisinin compileSdk degeri 34'e cekilir;
+          # boylece eklentiler yeniden derlenirken AAR metadata SDK 34'e
+          # guncellenir. plugins.withType, afterEvaluate'e gore daha erken
+          # calistigi icin "already evaluated" hatasina dusmez.
           # ------------------------------------------------------------------
           root_bg=android/build.gradle
           [ -f android/build.gradle.kts ] && root_bg=android/build.gradle.kts
@@ -301,11 +303,11 @@ jobs:
             if ! grep -q 'matrixportalx-ci-subprojects-override' "$root_bg"; then
               case "$root_bg" in
                 *.kts)
-                  printf '\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    afterEvaluate {\n        if (extensions.findByName("android") != null) {\n            extensions.configure(com.android.build.gradle.LibraryExtension::class.java) {\n                if (compileSdk != null && compileSdk!! < 34) {\n                    compileSdk = 34\n                }\n            }\n        }\n    }\n}\n' >> "$root_bg"
+                  printf '\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    plugins.withType<com.android.build.gradle.LibraryPlugin> {\n        extensions.configure<com.android.build.gradle.LibraryExtension>("android") {\n            if (compileSdk == null || compileSdk!! < 34) {\n                compileSdk = 34\n            }\n        }\n    }\n}\n' >> "$root_bg"
                   echo "subprojects override eklendi (kts)."
                   ;;
                 *)
-                  printf "\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    afterEvaluate { project ->\n        if (project.hasProperty('android')) {\n            project.android {\n                if (compileSdkVersion < 34) {\n                    compileSdkVersion 34\n                }\n            }\n        }\n    }\n}\n" >> "$root_bg"
+                  printf "\n\n// matrixportalx-ci-subprojects-override\nsubprojects {\n    plugins.withType(com.android.build.gradle.LibraryPlugin) {\n        project.android {\n            if (compileSdkVersion == null || compileSdkVersion < 34) {\n                compileSdkVersion 34\n            }\n        }\n    }\n}\n" >> "$root_bg"
                   echo "subprojects override eklendi (groovy)."
                   ;;
               esac
